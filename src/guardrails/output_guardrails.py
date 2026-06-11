@@ -39,14 +39,15 @@ def content_filter(response: str) -> dict:
     issues = []
     redacted = response
 
-    # PII patterns to check
+    # PII / secret patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "API key": r"sk-[a-zA-Z0-9_-]+",
+        "Password": r"password\s*[:=]\s*\S+",
+        "Admin credential": r"admin123",
+        "DB connection": r"\b[\w.-]+\.internal(?::\d+)?\b",
+        "Email": r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}",
+        "VN phone number": r"\b0\d{9,10}\b",
+        "National ID": r"\b\d{12}\b|\b\d{9}\b",
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -89,15 +90,11 @@ Respond with ONLY one word: SAFE or UNSAFE
 If UNSAFE, add a brief reason on the next line.
 """
 
-# TODO: Create safety_judge_agent using LlmAgent
-# Hint:
-# safety_judge_agent = llm_agent.LlmAgent(
-#     model="gemini-2.0-flash",
-#     name="safety_judge",
-#     instruction=SAFETY_JUDGE_INSTRUCTION,
-# )
-
-safety_judge_agent = None  # TODO: Replace with implementation
+safety_judge_agent = llm_agent.LlmAgent(
+    model="gemini-2.5-flash-lite",
+    name="safety_judge",
+    instruction=SAFETY_JUDGE_INSTRUCTION,
+)
 judge_runner = None
 
 
@@ -172,16 +169,32 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        # 1. Deterministic content filter: redact any PII / secrets that slipped through
+        filtered = content_filter(response_text)
+        if not filtered["safe"]:
+            self.redacted_count += 1
+            response_text = filtered["redacted"]
+            llm_response.content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=response_text)],
+            )
 
-        return llm_response  # TODO: modify if needed
+        # 2. LLM-as-Judge: catch subtler unsafe content the regex missed
+        if self.use_llm_judge:
+            verdict = await llm_safety_check(response_text)
+            if not verdict["safe"]:
+                self.blocked_count += 1
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text=(
+                        "I'm sorry, but I can't share that response as it may contain "
+                        "sensitive or unsafe information. How else can I help you with "
+                        "your banking needs?"
+                    ))],
+                )
+
+        # 3. Return the (possibly modified) response
+        return llm_response
 
 
 # ============================================================
